@@ -12,6 +12,8 @@
     "@tauri-apps/plugin-opener": "^2.4.0",
     "@tauri-apps/plugin-os": "~2.2.2",
     "@tauri-apps/plugin-store": "~2.2.1",
+    "katex": "^0.16.22",
+    "lucide-react": "^0.542.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-error-boundary": "^4.1.2",
