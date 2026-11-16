@@ -1,299 +1,262 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
-import { Plus, X } from "lucide-react";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, ArrowRight, BookOpen, EllipsisVertical, Disc, Minus, Plus } from "lucide-react";
+
+const STORAGE_KEY = "libraryPath";
+const MAX_QUANTITY = 9999;
+const SERIF = 'Georgia, "Times New Roman", serif';
+
+function Cover({ path }) {
+  const [broken, setBroken] = useState(false);
+  // A real cover is drawn as-is, so transparent areas show the row behind it.
+  if (path && !broken) {
+    return (
+      <img
+        src={convertFileSrc(path)}
+        alt=""
+        loading="lazy"
+        decoding="async"
+        className="w-24 h-24 flex-shrink-0 object-contain"
+        onError={() => setBroken(true)}
+      />
+    );
+  }
+  return (
+    <div className="w-24 h-24 flex-shrink-0 rounded-md bg-[#dedcd6] border border-[#d2d0ca] flex items-center justify-center text-[#a09d96]">
+      <Disc size={32} strokeWidth={1.5} />
+    </div>
+  );
+}
+
+function ItemRow({ item, onChange }) {
+  return (
+    <div className={`flex items-center gap-4 px-4 py-2 hover:bg-[#dedcd6] ${item.missing ? "opacity-50" : ""}`}>
+      <Cover path={item.cover} />
+      <div className="flex-1 min-w-0">
+        <div className="text-[16px] text-[#2a2a2a] truncate">{item.name}</div>
+        {item.missing && (
+          <div className="text-[12px] text-[#7d7b76]">Missing: folder not found</div>
+        )}
+      </div>
+      <div className="flex items-center gap-1 text-[#7d7b76] select-none">
+        <button
+          className="w-6 h-6 flex items-center justify-center rounded hover:bg-[#d2d0ca] hover:text-[#2a2a2a] disabled:opacity-30 disabled:hover:bg-transparent"
+          disabled={item.missing || item.quantity <= 0}
+          onClick={() => onChange(item.id, -1)}
+          aria-label="Decrease quantity"
+        >
+          <Minus size={14} />
+        </button>
+        <span className="w-9 text-center text-[15px] text-[#2a2a2a] tabular-nums">{item.quantity}</span>
+        <button
+          className="w-6 h-6 flex items-center justify-center rounded hover:bg-[#d2d0ca] hover:text-[#2a2a2a] disabled:opacity-30 disabled:hover:bg-transparent"
+          disabled={item.missing || item.quantity >= MAX_QUANTITY}
+          onClick={() => onChange(item.id, 1)}
+          aria-label="Increase quantity"
+        >
+          <Plus size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function App() {
-  const [vaultPath, setVaultPath] = useState(null);
-  const [files, setFiles] = useState([]);
-  const [openTabs, setOpenTabs] = useState([]);
-  const [activeTab, setActiveTab] = useState(null);
-  const [noteContent, setNoteContent] = useState("");
-  const [showNoteList, setShowNoteList] = useState(false);
-  const [expandedFolders, setExpandedFolders] = useState(new Set());
+  const [libraryPath, setLibraryPath] = useState(null);
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [warning, setWarning] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
+
+  useEffect(() => {
+    document.documentElement.style.colorScheme = "light";
+  }, []);
+
+  const pathRef = useRef(null);
+  const queue = useRef(Promise.resolve());
+
+  // Scans and saves run one after another, so they can never overtake each other.
+  const enqueue = (fn) => {
+    const run = queue.current.then(fn, fn);
+    queue.current = run.catch(() => {});
+    return run;
+  };
+
+  const scan = useCallback((path, silent = false) => {
+    if (!silent) setLoading(true);
+    return enqueue(() => invoke("scan_library", { path }))
+      .then((lib) => {
+        if (pathRef.current !== path) return true;
+        setItems(lib.items);
+        setWarning(lib.warning);
+        setError(null);
+        return true;
+      })
+      .catch((e) => {
+        setError(String(e));
+        return false;
+      })
+      .finally(() => {
+        if (!silent) setLoading(false);
+      });
+  }, []);
+
+  const loadLibrary = useCallback(
+    async (path) => {
+      pathRef.current = path;
+      setLibraryPath(path);
+      setItems([]);
+      setWarning(null);
+      const ok = await scan(path);
+      if (ok) {
+        localStorage.setItem(STORAGE_KEY, path);
+      } else {
+        pathRef.current = null;
+        setLibraryPath(null);
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    },
+    [scan]
+  );
+
+  const openLibrary = useCallback(async () => {
+    try {
+      const selected = await invoke("open_directory_picker");
+      if (selected) await loadLibrary(selected);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [loadLibrary]);
 
   useEffect(() => {
     getCurrentWindow().show();
-    
-    // Listen for keyboard shortcuts
+
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) loadLibrary(saved);
+
     const handleKeyDown = (e) => {
-      if (e.ctrlKey && e.shiftKey && e.key === 'O') {
+      if (e.ctrlKey && e.shiftKey && e.key === "O") {
         e.preventDefault();
-        openVault();
+        openLibrary();
       }
     };
-    
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+    // Coming back to the window (e.g. after adding folders or editing catalog.csv) refreshes the list.
+    const handleFocus = () => {
+      if (pathRef.current) scan(pathRef.current, true);
+    };
 
-  // Helper function to remove .md extension from display name
-  const removeMarkdownExtension = (fileName) => {
-    return fileName.endsWith('.md') ? fileName.slice(0, -3) : fileName;
-  };
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [loadLibrary, openLibrary, scan]);
 
-  const openVault = async () => {
-    try {
-      const selected = await invoke('open_directory_picker');
-      if (selected) {
-        setVaultPath(selected);
-        loadFiles(selected);
-      }
-    } catch (error) {
-      console.error('Failed to open vault:', error);
-    }
-  };
+  const changeQuantity = (id, delta) => {
+    const current = items.find((i) => i.id === id);
+    if (!current) return;
+    const next = Math.min(MAX_QUANTITY, Math.max(0, current.quantity + delta));
+    if (next === current.quantity) return;
+    const path = pathRef.current;
 
-  const loadFiles = async (path) => {
-    try {
-      const fileList = await invoke('get_vault_files', { path });
-      setFiles(fileList);
-    } catch (error) {
-      console.error('Failed to load files:', error);
-    }
-  };
-
-  const openNote = async (filePath, fileName) => {
-    try {
-      // Check if tab is already open
-      if (openTabs.find(tab => tab.path === filePath)) {
-        setActiveTab(filePath);
-        setShowNoteList(false);
-        return;
-      }
-
-      const content = await invoke('read_note', { path: filePath });
-      const displayName = removeMarkdownExtension(fileName);
-      const newTab = { path: filePath, name: displayName, content };
-      
-      setOpenTabs(prev => [...prev, newTab]);
-      setActiveTab(filePath);
-      setNoteContent(content);
-      setShowNoteList(false);
-    } catch (error) {
-      console.error('Failed to open note:', error);
-    }
-  };
-
-  const closeTab = (tabPath) => {
-    setOpenTabs(prev => prev.filter(tab => tab.path !== tabPath));
-    if (activeTab === tabPath) {
-      const remainingTabs = openTabs.filter(tab => tab.path !== tabPath);
-      if (remainingTabs.length > 0) {
-        setActiveTab(remainingTabs[0].path);
-        setNoteContent(remainingTabs[0].content);
-      } else {
-        setActiveTab(null);
-        setNoteContent("");
-      }
-    }
-  };
-
-  const switchTab = (tabPath) => {
-    setActiveTab(tabPath);
-    const tab = openTabs.find(t => t.path === tabPath);
-    if (tab) {
-      setNoteContent(tab.content);
-    }
-    setShowNoteList(false);
-  };
-
-  const toggleFolder = (folderPath) => {
-    setExpandedFolders(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(folderPath)) {
-        newSet.delete(folderPath);
-      } else {
-        newSet.add(folderPath);
-      }
-      return newSet;
+    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, quantity: next } : i)));
+    enqueue(() => invoke("set_quantity", { path, id, quantity: next })).catch((e) => {
+      // Show what is really saved, then keep the error visible.
+      scan(path, true).then(() => setError(String(e)));
     });
   };
 
-  const updateNoteContent = async (newContent) => {
-    setNoteContent(newContent);
-    if (activeTab) {
-      try {
-        await invoke('write_note', { path: activeTab, content: newContent });
-        // Update tab content
-        setOpenTabs(prev => prev.map(tab => 
-          tab.path === activeTab ? { ...tab, content: newContent } : tab
-        ));
-      } catch (error) {
-        console.error('Failed to save note:', error);
-      }
+  // Items arrive sorted by format, then name; group them for display.
+  const groups = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const shown = q ? items.filter((i) => i.name.toLowerCase().includes(q)) : items;
+    const out = [];
+    for (const item of shown) {
+      const last = out[out.length - 1];
+      if (last && last.format === item.format) last.items.push(item);
+      else out.push({ format: item.format, items: [item] });
     }
-  };
-
-  const renderFileTree = (items, level = 0) => {
-    return items.map((item, index) => (
-      <div key={index} style={{ marginLeft: `${level * 16}px` }}>
-        {item.type === 'folder' ? (
-          <div>
-            <div 
-              className="flex items-center py-1 px-2 hover:bg-[#333] cursor-pointer"
-              onClick={() => toggleFolder(item.path)}
-            >
-              <span className="mr-2">
-                {expandedFolders.has(item.path) ? '📂' : '📁'}
-              </span>
-              {item.name}
-            </div>
-            {expandedFolders.has(item.path) && item.children && (
-              <div>
-                {renderFileTree(item.children, level + 1)}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div 
-            className="flex items-center py-1 px-2 hover:bg-[#333] cursor-pointer"
-            onClick={() => openNote(item.path, item.name)}
-          >
-            <span className="mr-2">📄</span>
-            {removeMarkdownExtension(item.name)}
-          </div>
-        )}
-      </div>
-    ));
-  };
+    return out;
+  }, [items, searchQuery]);
 
   return (
     <div className="relative flex flex-col h-screen">
-      <style>{`
-        /* Define CSS custom properties for tab styling */
-        :root {
-          --tab-curve: 6px;
-          --tab-outline-width: 1px;
-          --tab-outline-color: #353636;
-          --tab-background-active: #262626;
-        }
-
-        /* When tabs are squeezed, reduce width proportionally */
-        .tabs-squeezed .tab-header {
-          width: auto;
-          flex: 1;
-        }
-
-        /* Pseudo-elements for curved edges */
-        .tab-header::before,
-        .tab-header::after {
-          position: absolute;
-          bottom: 0.4px;
-          content: '';
-          width: calc(var(--tab-curve) * 2);
-          height: calc(var(--tab-curve) * 2);
-          border-radius: 100%;
-          pointer-events: none;
-          z-index: -1;
-        }
-
-        .tab-header::before {
-          left: calc(var(--tab-curve) * -2);
-          clip-path: inset(50% calc(var(--tab-curve) * -1) 0 50%);
-        }
-
-        .tab-header::after {
-          right: calc(var(--tab-curve) * -2);
-          clip-path: inset(50% 50% 0 calc(var(--tab-curve) * -1));
-        }
-
-        /* Active tab styling with curved edges */
-        .tab-header.active::before,
-        .tab-header.active::after {
-          box-shadow: 
-            inset 0 0 0 var(--tab-outline-width) var(--tab-outline-color), 
-            0 0 0 calc(var(--tab-curve) * 4) var(--tab-background-active);
-        }
-
-        /* Active tab gets elevated appearance */
-        .tab-header.active {
-          background-color: var(--tab-background-active);
-          border-color: var(--tab-outline-color);
-          z-index: 2;
-           /* Extend 1px below to cover header border */
-        }
-
-        /* Ensure curved edges don't get clipped */
-        .tab-header.active::before,
-        .tab-header.active::after {
-          z-index: -1;
-        }
-      `}</style>
-      
-      <header className="bg-[#262626] text-[#d1d1d1] h-[33px] flex border-[#353636] border-b-[0.4px] px-2">
-          <div className="tabs-container mx-[6px] flex overflow-visible shrink min-w-0 mt-[6px] ">
-            {openTabs.map((tab) => (
-              <div 
-                key={tab.path}
-                className={`tab-header flex mb-[-1px] items-center  rounded-sm px-[1px] pb-[4px] border-[#353636] relative border-t border-l border-r z-10 w-[167px] min-w-[80px] shrink ${
-                  activeTab === tab.path 
-                    ? 'active border-[#353636]'
-                    : 'border-transparent text-[#999]'
-                }`}
-               
-              >
-                <div className={`flex items-center w-full h-full relative rounded-sm px-1 group ${
-                  activeTab === tab.path 
-                    ? ''
-                    : 'hover:bg-[#323232]'
-                }`}  onClick={() => switchTab(tab.path)}>
-                <span className="text-[11px] truncate flex-1 select-none">{tab.name}</span>
-                <button 
-  className={`ml-1 hover:text-white flex-shrink-0 ${
-    activeTab === tab.path ? '' : 'hidden group-hover:block'
-  }`}
-  onClick={(e) => {
-    e.stopPropagation();
-    closeTab(tab.path);
-  }}
->
-  <X size={14} />
-</button>
-                </div>
-              </div>
-            ))}
-          </div>
-           <button 
-            className="w-[22px] h-full mr-3 pt-2 pb-[6px] flex justify-center items-center text-[#888] hover:text-[#d1d1d1]"
-            disabled={!vaultPath}
-            onClick={() => setShowNoteList(!showNoteList)}
-          >
-            <Plus size={15} />
+      <header className="bg-[#e9e7e2] text-[#2a2a2a] h-[40px] flex items-center border-[#d2d0ca] border-b-[0.4px] px-2">
+        <div className="flex items-center h-full ml-1 text-[#a09d96]">
+          <button className="w-[25px] h-full flex justify-center items-center cursor-default" disabled>
+            <ArrowLeft size={15} strokeWidth={1.75} />
           </button>
-       
-       
+          <button className="w-[25px] h-full flex justify-center items-center cursor-default" disabled>
+            <ArrowRight size={15} strokeWidth={1.75} />
+          </button>
+        </div>
+
+        <input
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Search"
+          spellCheck={false}
+          className="flex-1 min-w-0 mx-2 h-[30px] bg-transparent outline-none border border-[#d2d0ca] focus:border-[#a09d96] rounded-md px-3 text-[13px] text-[#2a2a2a] placeholder-[#85827c]"
+        />
+
+        <div className="flex items-center h-full mr-1 text-[#85827c]">
+          <button className="w-[25px] h-full flex justify-center items-center hover:text-[#2a2a2a]">
+            <BookOpen size={15} strokeWidth={1.75} />
+          </button>
+          <button className="w-[25px] h-full flex justify-center items-center hover:text-[#2a2a2a]">
+            <EllipsisVertical size={15} strokeWidth={1.75} />
+          </button>
+        </div>
       </header>
 
-      <div className="main flex-1 bg-[#262626] text-[#888888]">
-        {!vaultPath ? (
-          <div className="flex-1 flex items-center justify-center text-[13px] flex-col">
-            <div 
-              className="cursor-pointer hover:text-[#d1d1d1] transition-colors"
-              onClick={openVault}
+      <div className="main flex-1 flex flex-col min-h-0 bg-[#e9e7e2] text-[#625f5a]" style={{ fontFamily: SERIF }}>
+        {(error || warning) && (
+          <div className="px-4 py-2 text-[12px] border-b border-[#d2d0ca] whitespace-pre-line">
+            {error && <div className="text-[#b3362b]">{error}</div>}
+            {warning && <div className="text-[#8a6a00]">{warning}</div>}
+          </div>
+        )}
+
+        {!libraryPath ? (
+          <div
+            className="flex-1 flex items-center justify-center flex-col gap-3 text-[13px] leading-5 text-[#7d7b76] select-none"
+          >
+            <div
+              className="cursor-pointer hover:text-[#2a2a2a] transition-colors"
+              onClick={openLibrary}
             >
               Open existing vault (Ctrl + Shift + O)
             </div>
-          </div>
-        ) : showNoteList ? (
-          <div className="flex-1 p-4 overflow-y-auto">
-            <div className="text-sm mb-4 font-medium text-[#d1d1d1]">
-              Files in vault
+            <div
+              className="cursor-pointer hover:text-[#2a2a2a] transition-colors"
+              onClick={() => getCurrentWindow().close()}
+            >
+              Close
             </div>
-            {renderFileTree(files)}
           </div>
-        ) : activeTab ? (
-          <div className="flex-1 p-4">
-            <textarea
-              value={noteContent}
-              onChange={(e) => updateNoteContent(e.target.value)}
-              className="w-full h-full bg-transparent text-[#d1d1d1] resize-none outline-none font-mono text-sm"
-              placeholder="Start writing..."
-            />
+        ) : loading && items.length === 0 ? (
+          <div className="flex-1 flex items-center justify-center text-[13px]">Scanning…</div>
+        ) : items.length === 0 ? (
+          <div className="flex-1 flex items-center justify-center text-[13px] text-center px-8">
+            No items found. Each item is a folder inside a format folder, e.g. CD&amp;DVD/Item name/cover.png
           </div>
+        ) : groups.length === 0 ? (
+          <div className="flex-1 flex items-center justify-center text-[13px]">No matches</div>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-[13px]">
-            <div>Select a note to start editing</div>
+          <div className="flex-1 min-h-0 overflow-y-auto pb-4">
+            {groups.map((g) => (
+              <section key={g.format}>
+                <div className="sticky top-0 z-10 bg-[#e9e7e2] px-4 pt-4 pb-1 text-[12px] uppercase tracking-wide text-[#7d7b76]">
+                  {g.format} · {g.items.length}
+                </div>
+                {g.items.map((item) => (
+                  <ItemRow key={item.id} item={item} onChange={changeQuantity} />
+                ))}
+              </section>
+            ))}
           </div>
         )}
       </div>

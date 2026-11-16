@@ -11,7 +11,10 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
-    open: process.env.TAURI_ENV_ARCH === undefined
+    open: process.env.TAURI_ENV_ARCH === undefined,
+    watch: {
+      ignored: ['**/src-tauri/**']
+    }
   },
   envPrefix: ['VITE_', 'TAURI_ENV_'],
   build: {

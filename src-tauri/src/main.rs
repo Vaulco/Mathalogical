@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod catalog;
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -129,6 +131,22 @@ async fn write_note(path: String, content: String) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+async fn scan_library(path: String) -> Result<catalog::Library, String> {
+    tauri::async_runtime::spawn_blocking(move || catalog::scan(Path::new(&path)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn set_quantity(path: String, id: String, quantity: u32) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        catalog::set_quantity(Path::new(&path), &id, quantity)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init()) // required for dialog
@@ -136,7 +154,9 @@ fn main() {
             open_directory_picker,
             get_vault_files,
             read_note,
-            write_note
+            write_note,
+            scan_library,
+            set_quantity
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
