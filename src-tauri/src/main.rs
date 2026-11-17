@@ -139,9 +139,27 @@ async fn scan_library(path: String) -> Result<catalog::Library, String> {
 }
 
 #[tauri::command]
-async fn set_quantity(path: String, id: String, quantity: u32) -> Result<(), String> {
+async fn set_quantity(path: String, format: String, folder: String, quantity: u32) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        catalog::set_quantity(Path::new(&path), &id, quantity)
+        catalog::set_quantity(Path::new(&path), &format, &folder, quantity)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn set_name(path: String, format: String, folder: String, name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        catalog::set_name(Path::new(&path), &format, &folder, &name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn set_date(path: String, format: String, folder: String, date: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        catalog::set_date(Path::new(&path), &format, &folder, &date)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -156,7 +174,9 @@ fn main() {
             read_note,
             write_note,
             scan_library,
-            set_quantity
+            set_quantity,
+            set_name,
+            set_date
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
